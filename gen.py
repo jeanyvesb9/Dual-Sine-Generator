@@ -1,8 +1,14 @@
-import pyaudio
+import sys
+import threading
+import queue
 import numpy as np
-import tkinter
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import pyaudio
+import tkinter
+import serial
+import serial.tools.list_ports
+
 
 f_sampling = 44100
 duration = 10.0
@@ -27,7 +33,7 @@ def sound_callback(in_data, frame_count, time_info, status):
     return (data, pyaudio.paContinue)
 
 class MainWindow(tkinter.Frame):
-    def __init__(self, root):
+    def __init__(self, root, port):
         tkinter.Frame.__init__(self, root)
         self.root = root
         root.title("Noche de los Museos")
@@ -39,6 +45,12 @@ class MainWindow(tkinter.Frame):
         self.samples_2 = np.zeros(sample_len)
         self.is_playing_1 = False
         self.is_playing_2 = False
+
+        self.remote = False
+        self.remote_port = port
+        self.remote_offset = 0
+        self.remote_thread_runninng = False
+        self.remote_queue = queue.Queue()
 
         self.p_audio = pyaudio.PyAudio()
         self.stream = self.p_audio.open(format=pyaudio.paFloat32, channels=2, rate=f_sampling, \
@@ -107,11 +119,21 @@ class MainWindow(tkinter.Frame):
         self.intensity_2_slider.grid(row=3, column=9)
         self.intensity_2_slider.set(1)
 
-        self.defaults_button_25 = tkinter.Button(self, text = "Default 25Hz", command = self.default_config_25)
+        self.defaults_button_25 = tkinter.Button(self, text="Default 25Hz", command=self.default_config_25)
         self.defaults_button_25.grid(column=10, row=0, rowspan=2)
 
-        self.defaults_button_30 = tkinter.Button(self, text = "Default 30Hz", command = self.default_config_30)
+        self.defaults_button_30 = tkinter.Button(self, text="Default 30Hz", command=self.default_config_30)
         self.defaults_button_30.grid(column=10, row=2, rowspan=2)
+
+        self.remote_control_button = tkinter.Button(self, text='Remoto', command=self.toggle_remote, relief="raised")
+        self.remote_control_button.grid(row=2, column=11, rowspan=2)
+        if self.remote_port is None:
+            self.remote_control_button.config(state='disabled')
+        self.remote_control_offset = tkinter.Label(self, text='25')
+        self.remote_control_offset.grid(row = 2, column=12, rowspan=2)
+
+
+
         
         self.plot_fig = plt.Figure(figsize=(10,5), dpi=100)
         self.plot_ax1 = self.plot_fig.add_subplot(311)
@@ -132,15 +154,18 @@ class MainWindow(tkinter.Frame):
         self.plot_ax3.set_xlim(0, t[-1] * 0.01)
         self.plot_ax3.set_ylabel('Superposición')
         self.plot_ax3.set_xlabel('t')
-        #self.plot_fig.tight_layout()
 
-        self.plot_canvas = FigureCanvasTkAgg(self.plot_fig, master=self)  # A tk.DrawingArea.
+        self.plot_canvas = FigureCanvasTkAgg(self.plot_fig, master=self)
         self.plot_canvas.draw()
-        self.plot_canvas.get_tk_widget().grid(row=5, columnspan=11)
+        self.plot_canvas.get_tk_widget().grid(row=5, columnspan=13)
 
-        #toolbar = NavigationToolbar2Tk(canvas, self)
-        #toolbar.update()
-        #canvas.get_tk_widget().grid(row=6)
+
+        self.after(200, self.listen_for_result)
+        if self.remote_port is not None:
+            self.remote_thread = threading.Thread(target=self.read_remote_port)
+            self.remote_port.reset_input_buffer()
+            self.remote_thread_runninng = True
+            self.remote_thread.start()
         
 
     def onFloatValidate(self, d, i, P, s, S, v, V, W):
@@ -185,6 +210,13 @@ class MainWindow(tkinter.Frame):
         if t2 == '' or float(t2) < 0:
             self.freq_2_entry_text.set('0')
 
+        f2 = float(self.freq_2_entry_text.get())
+        if self.remote:
+            f2 += self.remote_offset
+            if f2 < 0:
+                f2 = 0
+        self.remote_control_offset.config(text='%.2f' % round(f2, 2))
+
         if self.is_playing_1:
             self.samples_1 = self.create_sin(float(self.freq_1_entry_text.get()), \
                                                 self.phase_1_slider.get(), \
@@ -193,7 +225,7 @@ class MainWindow(tkinter.Frame):
             self.samples_1 = np.zeros(sample_len)
         
         if self.is_playing_2:
-            self.samples_2 = self.create_sin(float(self.freq_2_entry_text.get()), \
+            self.samples_2 = self.create_sin(f2, \
                                                 self.phase_2_slider.get(), \
                                                 self.intensity_2_slider.get())
         else:
@@ -255,14 +287,62 @@ class MainWindow(tkinter.Frame):
         self.button_toggle_2.config(text="Desactivar")
         self.updateGenerator()
 
+    def toggle_remote(self):
+        if self.remote:
+            self.remote_control_button.config(relief='raised')
+            self.remote = False
+            self.freq_2_entry.config(fg='black')
+        else:
+            self.remote_control_button.config(relief='sunken')
+            with self.remote_queue.mutex:
+                self.remote_queue.queue.clear()
+            self.remote = True
+            self.freq_2_entry.config(fg='red')
+        self.updateGenerator()
+
+    def read_remote_port(self):
+        while self.remote_thread_runninng:
+            self.remote_queue.put(float(self.remote_port.read_until())/1023 * 3 - 1.5)
+
+    def listen_for_result(self):
+        if self.remote:
+            try:
+                self.remote_offset = self.remote_queue.get(0)
+                self.after(300, self.listen_for_result)
+                self.updateGenerator()
+            except queue.Empty:
+                self.after(300, self.listen_for_result)
+        else:
+            self.after(300, self.listen_for_result)
     
     def close_fn(self):
         self.stream.stop_stream()
         self.stream.close()
         self.p_audio.terminate()
         self.root.destroy()
+        if self.remote:
+            self.remote = False
+        if self.remote_port:
+            self.remote_thread_runninng = False
+
+def main():
+    port = None
+    if len(sys.argv) > 0:
+        if sys.argv[1] == '--list_interfaces':
+            for port in serial.tools.list_ports.comports():
+                print(port.device, '-', port.name, '-', port.description)
+            return
+        elif sys.argv[1] == '-c':
+            port = serial.Serial(sys.argv[2], baudrate=9600)
+        else:
+            print('Unknown command. Options:')
+            print('--list_interfaces')
+            print('-c <device_port>')
+            return
+
+    root = tkinter.Tk()
+    MainWindow(root, port).pack(fill="both", expand=True)
+    root.mainloop()
 
 if __name__ == '__main__':
-    root = tkinter.Tk()
-    MainWindow(root).pack(fill="both", expand=True)
-    root.mainloop()
+    main()
