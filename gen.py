@@ -2,6 +2,8 @@ import sys
 import threading
 import queue
 import numpy as np
+import scipy as sp
+import scipy.signal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pyaudio
@@ -144,13 +146,13 @@ class MainWindow(tkinter.Frame):
         self.plot_ax1.set_ylabel('Agua')
         self.plot_ax2 = self.plot_fig.add_subplot(312)
         self.plot_samples_2 = self.plot_ax2.plot(t, self.samples_2)[0]
-        self.plot_ax2.set_ylim(-1.1, 1.1)
+        self.plot_ax2.set_ylim(-0.1, 1.1)
         self.plot_ax2.set_xlim(0, t[-1] * 0.01)
         self.plot_ax2.xaxis.set_ticklabels([])
         self.plot_ax2.set_ylabel('Luz')
         self.plot_ax3 = self.plot_fig.add_subplot(313)
-        self.plot_samples_3 = self.plot_ax3.plot(t, self.samples_1 + self.samples_2)[0]
-        self.plot_ax3.set_ylim(-2.1, 2.1)
+        self.plot_samples_3 = self.plot_ax3.plot(t, self.samples_1 * self.samples_2)[0]
+        self.plot_ax3.set_ylim(-1.1, 1.1)
         self.plot_ax3.set_xlim(0, t[-1] * 0.01)
         self.plot_ax3.set_ylabel('Superposición')
         self.plot_ax3.set_xlabel('t')
@@ -225,7 +227,7 @@ class MainWindow(tkinter.Frame):
             self.samples_1 = np.zeros(sample_len)
         
         if self.is_playing_2:
-            self.samples_2 = self.create_sin(f2, \
+            self.samples_2 = self.create_square(f2, \
                                                 self.phase_2_slider.get(), \
                                                 self.intensity_2_slider.get())
         else:
@@ -236,12 +238,15 @@ class MainWindow(tkinter.Frame):
 
         self.plot_samples_1.set_ydata(self.samples_1)
         self.plot_samples_2.set_ydata(self.samples_2)
-        self.plot_samples_3.set_ydata(self.samples_1 + self.samples_2)
+        self.plot_samples_3.set_ydata(self.samples_1 * self.samples_2)
         self.plot_canvas.draw()
         self.plot_canvas.flush_events()
 
     def create_sin(self, f=25, phase=0, v=1):
         return (np.sin(2 * np.pi * t * f / f_sampling + phase)).astype(np.float32) * v
+
+    def create_square(self, f=25, phase=0, v=1):
+        return (sp.signal.square(2 * np.pi * t * f / f_sampling + phase) + 1).astype(np.float32) * v/2
 
     def press_button_toggle_1(self):
         if self.is_playing_1:
@@ -327,10 +332,10 @@ class MainWindow(tkinter.Frame):
 
 def main():
     port = None
-    if len(sys.argv) > 0:
+    if len(sys.argv) > 1:
         if sys.argv[1] == '--list_interfaces':
-            for port in serial.tools.list_ports.comports():
-                print(port.device, '-', port.name, '-', port.description)
+            for p in serial.tools.list_ports.comports():
+                print(p.device, '-', p.name, '-', p.description)
             return
         elif sys.argv[1] == '-c':
             port = serial.Serial(sys.argv[2], baudrate=9600)
