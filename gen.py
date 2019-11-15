@@ -8,11 +8,14 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pyaudio
 import tkinter
-import serial
-import serial.tools.list_ports
 
 
 f_sampling = 44100
+mic_chunk = 2**11
+mic_readings = []
+mic_last = 0
+mic_calibration = 1
+remote_offset = 0
 duration = 10.0
 sample_len = int(f_sampling * duration)
 t = np.arange(sample_len)
@@ -22,8 +25,12 @@ stereo_signal = np.zeros([sample_len, 2], dtype=np.float32)
 index = 0
 
 
+
 def sound_callback(in_data, frame_count, time_info, status):
     global index
+    global mic_readings
+    global mic_last
+    global remote_offset
     cut_index = (index + frame_count) if (index + frame_count) <= sample_len else sample_len
     data = stereo_signal[index:cut_index, :] 
     if cut_index != sample_len:
@@ -31,11 +38,24 @@ def sound_callback(in_data, frame_count, time_info, status):
     else:
         index = frame_count - len(data)
         data = np.concatenate([np.asarray(data), np.asarray(stereo_signal[0:index, :])])
+    
+    mic_data = np.frombuffer(in_data, dtype=np.float32)[1::2].copy() #ONLY LEFT CHANNEL
+    mic_data -= np.average(mic_data)
+    peak = np.average(np.abs(mic_data))*2 * 1000
+    mic_readings.append(peak)
+    if len(mic_readings) == 6:
+        mic_last = np.average(mic_readings)
+        mic_fl = mic_last / mic_calibration if mic_calibration != 0 else mic_last
+        remote_offset = mic_fl * 3 - 1.5
+        mic_readings = []
 
     return (data, pyaudio.paContinue)
 
+def mic_callback(in_data, frame_count, time_info, status):
+    pass
+
 class MainWindow(tkinter.Frame):
-    def __init__(self, root, port):
+    def __init__(self, root):
         tkinter.Frame.__init__(self, root)
         self.root = root
         root.title("Noche de los Museos")
@@ -49,14 +69,11 @@ class MainWindow(tkinter.Frame):
         self.is_playing_2 = False
 
         self.remote = False
-        self.remote_port = port
-        self.remote_offset = 0
-        self.remote_thread_runninng = False
-        self.remote_queue = queue.Queue()
+        
 
         self.p_audio = pyaudio.PyAudio()
         self.stream = self.p_audio.open(format=pyaudio.paFloat32, channels=2, rate=f_sampling, \
-            output=True, stream_callback=sound_callback)
+            output=True, input=True, stream_callback=sound_callback, frames_per_buffer=mic_chunk)
         self.stream.start_stream()
 
         vcmd = (self.register(self.onFloatValidate),'%d', '%i', '%P', '%s', '%S', '%v', '%V', '%W')
@@ -122,17 +139,20 @@ class MainWindow(tkinter.Frame):
         self.intensity_2_slider.set(1)
 
         self.defaults_button_25 = tkinter.Button(self, text="Default 25Hz", command=self.default_config_25)
-        self.defaults_button_25.grid(column=10, row=0, rowspan=2)
+        self.defaults_button_25.grid(column=10, row=1)
 
         self.defaults_button_30 = tkinter.Button(self, text="Default 30Hz", command=self.default_config_30)
-        self.defaults_button_30.grid(column=10, row=2, rowspan=2)
+        self.defaults_button_30.grid(column=10, row=3)
+
+        self.remote_control_calibration = tkinter.Button(self, text='Calibrar', command=self.remote_calibration)
+        self.remote_control_calibration.grid(row=1, column=11)
 
         self.remote_control_button = tkinter.Button(self, text='Remoto', command=self.toggle_remote, relief="raised")
-        self.remote_control_button.grid(row=2, column=11, rowspan=2)
-        if self.remote_port is None:
-            self.remote_control_button.config(state='disabled')
+        self.remote_control_button.grid(row=3, column=11)
+        #if self.remote_port is None:
+        #    self.remote_control_button.config(state='disabled')
         self.remote_control_offset = tkinter.Label(self, text='25')
-        self.remote_control_offset.grid(row = 2, column=12, rowspan=2)
+        self.remote_control_offset.grid(row = 3, column=12)
 
 
 
@@ -161,14 +181,7 @@ class MainWindow(tkinter.Frame):
         self.plot_canvas.draw()
         self.plot_canvas.get_tk_widget().grid(row=5, columnspan=13)
 
-
-        self.after(200, self.listen_for_result)
-        if self.remote_port is not None:
-            self.remote_thread = threading.Thread(target=self.read_remote_port)
-            self.remote_port.reset_input_buffer()
-            self.remote_thread_runninng = True
-            self.remote_thread.start()
-        
+        #self.after(200, self.remote_update)
 
     def onFloatValidate(self, d, i, P, s, S, v, V, W):
         try:
@@ -214,7 +227,7 @@ class MainWindow(tkinter.Frame):
 
         f2 = float(self.freq_2_entry_text.get())
         if self.remote:
-            f2 += self.remote_offset
+            f2 += remote_offset
             if f2 < 0:
                 f2 = 0
         self.remote_control_offset.config(text='%.2f' % round(f2, 2))
@@ -299,54 +312,29 @@ class MainWindow(tkinter.Frame):
             self.freq_2_entry.config(fg='black')
         else:
             self.remote_control_button.config(relief='sunken')
-            with self.remote_queue.mutex:
-                self.remote_queue.queue.clear()
             self.remote = True
+            self.after(300, self.remote_update)
             self.freq_2_entry.config(fg='red')
         self.updateGenerator()
 
-    def read_remote_port(self):
-        while self.remote_thread_runninng:
-            self.remote_queue.put(float(self.remote_port.read_until())/1023 * 3 - 1.5)
-
-    def listen_for_result(self):
+    def remote_update(self):
+        self.updateGenerator()
         if self.remote:
-            try:
-                self.remote_offset = self.remote_queue.get(0)
-                self.after(300, self.listen_for_result)
-                self.updateGenerator()
-            except queue.Empty:
-                self.after(300, self.listen_for_result)
-        else:
-            self.after(300, self.listen_for_result)
+            self.after(300, self.remote_update)
+            
+    def remote_calibration(self):
+        global mic_calibration
+        mic_calibration = mic_last
     
     def close_fn(self):
         self.stream.stop_stream()
         self.stream.close()
         self.p_audio.terminate()
         self.root.destroy()
-        if self.remote:
-            self.remote = False
-        if self.remote_port:
-            self.remote_thread_runninng = False
 
 def main():
-    port = None
-    if len(sys.argv) > 1:
-        if sys.argv[1] == '--list_interfaces':
-            for p in serial.tools.list_ports.comports():
-                print(p.device, '-', p.name, '-', p.description)
-            return
-        elif sys.argv[1] == '-c':
-            port = serial.Serial(sys.argv[2], baudrate=9600)
-        else:
-            print('Unknown command. Options:')
-            print('--list_interfaces')
-            print('-c <device_port>')
-            return
-
     root = tkinter.Tk()
-    MainWindow(root, port).pack(fill="both", expand=True)
+    MainWindow(root).pack(fill="both", expand=True)
     root.mainloop()
 
 if __name__ == '__main__':
